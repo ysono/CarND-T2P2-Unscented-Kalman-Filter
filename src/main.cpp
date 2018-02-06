@@ -4,8 +4,7 @@
 #include <math.h>
 #include "ukf.h"
 #include "tools.h"
-
-using namespace std;
+#include <ctime>
 
 // for convenience
 using json = nlohmann::json;
@@ -26,19 +25,30 @@ std::string hasData(std::string s) {
   return "";
 }
 
-int main()
+int main(int argc, char* argv[])
 {
+  bool is_verbose;
+  for (int i = 0; i < argc; i++) {
+    if (std::strcmp(argv[i], "--verbose") == 0) {
+      is_verbose = true;
+      break;
+    }
+  }
+
   uWS::Hub h;
 
   // Create a Kalman Filter instance
-  UKF ukf;
+  UKF ukf(is_verbose);
 
   // used to compute the RMSE later
   Tools tools;
-  vector<VectorXd> estimations;
-  vector<VectorXd> ground_truth;
+  VectorXd sse(4); // "sse" == summed squared errors
+  sse.fill(0.0);
+  int sse_count;
 
-  h.onMessage([&ukf,&tools,&estimations,&ground_truth](uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length, uWS::OpCode opCode) {
+  std::time_t last_nis_print_time = std::time(0);
+
+  h.onMessage([&ukf,&tools,&sse,&sse_count,&last_nis_print_time](uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length, uWS::OpCode opCode) {
     // "42" at the start of the message means there's a websocket message event.
     // The 4 signifies a websocket message
     // The 2 signifies a websocket event
@@ -48,86 +58,77 @@ int main()
 
       auto s = hasData(std::string(data));
       if (s != "") {
-      	
+        
         auto j = json::parse(s);
 
         std::string event = j[0].get<std::string>();
         
         if (event == "telemetry") {
           // j[1] is the data JSON object
-          
-          string sensor_measurment = j[1]["sensor_measurement"];
+          std::string sensor_measurment = j[1]["sensor_measurement"];
           
           MeasurementPackage meas_package;
-          istringstream iss(sensor_measurment);
-    	  long long timestamp;
+          std::istringstream iss(sensor_measurment);
+          long long timestamp;
 
-    	  // reads first element from the current line
-    	  string sensor_type;
-    	  iss >> sensor_type;
+          // reads first element from the current line
+          std::string sensor_type;
+          iss >> sensor_type;
 
-    	  if (sensor_type.compare("L") == 0) {
-      	  		meas_package.sensor_type_ = MeasurementPackage::LASER;
-          		meas_package.raw_measurements_ = VectorXd(2);
-          		float px;
-      	  		float py;
-          		iss >> px;
-          		iss >> py;
-          		meas_package.raw_measurements_ << px, py;
-          		iss >> timestamp;
-          		meas_package.timestamp_ = timestamp;
+          if (sensor_type.compare("L") == 0) {
+              meas_package.sensor_type_ = MeasurementPackage::LASER;
+              meas_package.raw_measurements_ = VectorXd(2);
+              float px;
+              float py;
+              iss >> px;
+              iss >> py;
+              meas_package.raw_measurements_ << px, py;
+              iss >> timestamp;
+              meas_package.timestamp_ = timestamp;
           } else if (sensor_type.compare("R") == 0) {
 
-      	  		meas_package.sensor_type_ = MeasurementPackage::RADAR;
-          		meas_package.raw_measurements_ = VectorXd(3);
-          		float ro;
-      	  		float theta;
-      	  		float ro_dot;
-          		iss >> ro;
-          		iss >> theta;
-          		iss >> ro_dot;
-          		meas_package.raw_measurements_ << ro,theta, ro_dot;
-          		iss >> timestamp;
-          		meas_package.timestamp_ = timestamp;
+              meas_package.sensor_type_ = MeasurementPackage::RADAR;
+              meas_package.raw_measurements_ = VectorXd(3);
+              float ro;
+              float theta;
+              float ro_dot;
+              iss >> ro;
+              iss >> theta;
+              iss >> ro_dot;
+              meas_package.raw_measurements_ << ro,theta, ro_dot;
+              iss >> timestamp;
+              meas_package.timestamp_ = timestamp;
           }
           float x_gt;
-    	  float y_gt;
-    	  float vx_gt;
-    	  float vy_gt;
-    	  iss >> x_gt;
-    	  iss >> y_gt;
-    	  iss >> vx_gt;
-    	  iss >> vy_gt;
-    	  VectorXd gt_values(4);
-    	  gt_values(0) = x_gt;
-    	  gt_values(1) = y_gt; 
-    	  gt_values(2) = vx_gt;
-    	  gt_values(3) = vy_gt;
-    	  ground_truth.push_back(gt_values);
+          float y_gt;
+          float vx_gt;
+          float vy_gt;
+          iss >> x_gt;
+          iss >> y_gt;
+          iss >> vx_gt;
+          iss >> vy_gt;
+          VectorXd gt_values(4);
+          gt_values(0) = x_gt;
+          gt_values(1) = y_gt;
+          gt_values(2) = vx_gt;
+          gt_values(3) = vy_gt;
           
           //Call ProcessMeasurment(meas_package) for Kalman filter
-    	  ukf.ProcessMeasurement(meas_package);    	  
+          ukf.ProcessMeasurement(meas_package);
 
-    	  //Push the current estimated x,y positon from the Kalman filter's state vector
-
-    	  VectorXd estimate(4);
-
-    	  double p_x = ukf.x_(0);
-    	  double p_y = ukf.x_(1);
-    	  double v  = ukf.x_(2);
-    	  double yaw = ukf.x_(3);
-
-    	  double v1 = cos(yaw)*v;
-    	  double v2 = sin(yaw)*v;
-
-    	  estimate(0) = p_x;
-    	  estimate(1) = p_y;
-    	  estimate(2) = v1;
-    	  estimate(3) = v2;
-    	  
-    	  estimations.push_back(estimate);
-
-    	  VectorXd RMSE = tools.CalculateRMSE(estimations, ground_truth);
+          VectorXd estimate(4);
+          double p_x = ukf.x_(0);
+          double p_y = ukf.x_(1);
+          double v  = ukf.x_(2);
+          double yaw = ukf.x_(3);
+          double v1 = cos(yaw)*v;
+          double v2 = sin(yaw)*v;
+          estimate(0) = p_x;
+          estimate(1) = p_y;
+          estimate(2) = v1;
+          estimate(3) = v2;
+          
+          VectorXd RMSE = tools.CalculateRMSE(sse, sse_count, estimate, gt_values);
 
           json msgJson;
           msgJson["estimate_x"] = p_x;
@@ -139,7 +140,13 @@ int main()
           auto msg = "42[\"estimate_marker\"," + msgJson.dump() + "]";
           // std::cout << msg << std::endl;
           ws.send(msg.data(), msg.length(), uWS::OpCode::TEXT);
-	  
+    
+          std::time_t now = std::time(0);
+          if (std::difftime(now, last_nis_print_time) > 0.8) {
+            std::cout << "Percentage of NIS values under 95% precentile in Chi2 distro: "
+              << ((float)ukf.radar_nis_count_over_95_ / ukf.radar_nis_count_ * 100) << std::endl;
+            last_nis_print_time = now;
+          }
         }
       } else {
         
@@ -186,90 +193,3 @@ int main()
   }
   h.run();
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
